@@ -1,7 +1,7 @@
 // This origin can host other projects: never touch their requests or caches.
 const ROOT = new URL("./", self.location.href),
   PREFIX = "barhex-shell-" + ROOT.pathname + "-",
-  CACHE = PREFIX + "c1adac331fbc656a",
+  CACHE = PREFIX + "84abe3d33455ab0a",
   INDEX = new URL("index.html", ROOT).href,
   PORTABLE_PAGES = ["Barhex.html", "HexShift.html"].map(
     (path) => new URL(path, ROOT).href,
