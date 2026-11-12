@@ -1,8 +1,7 @@
 // This origin can host other projects: never touch their requests or caches.
-const PREFIX = "hexshift-shell-",
-  CACHE = PREFIX + "45bd0b695ea7ea32",
-  LEGACY = "hexshift-v1";
 const ROOT = new URL("./", self.location.href),
+  PREFIX = "barhex-shell-" + ROOT.pathname + "-",
+  CACHE = PREFIX + "a8db57096992e7e7",
   INDEX = new URL("index.html", ROOT).href,
   PORTABLE_PAGES = ["Barhex.html", "HexShift.html"].map(
     (path) => new URL(path, ROOT).href,
@@ -28,8 +27,7 @@ self.addEventListener("activate", (e) => {
         Promise.all(
           keys
             .filter(
-              (key) =>
-                (key.startsWith(PREFIX) || key === LEGACY) && key !== CACHE,
+              (key) => key.startsWith(PREFIX) && key !== CACHE,
             )
             .map((key) => caches.delete(key)),
         ),
