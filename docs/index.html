@@ -6,7 +6,7 @@
       name="viewport"
       content="width=device-width,initial-scale=1,viewport-fit=cover"
     />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-3PihaA2BOPHqpesM2Dux8b513tbgKMgKaJptXF2bxzU='; style-src 'sha256-xdPHyRVJGfFcOQlnwyFrwhM/NiLhWfsNSr6ZeBvpZOE='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src data:; worker-src 'self' blob:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-d854+OdqCLPFRqvBomtSHwvHW7PIFIbL268dtVrHhS4='; style-src 'sha256-0EVHVNLtYCDeQEKmdwh9Qa5B3dfhNtfw4S5WZJOX8pY='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src data:; worker-src 'self' blob:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'" />
     <meta name="referrer" content="no-referrer" />
     <meta
       name="theme-color"
@@ -416,6 +416,17 @@ summary::marker {
   color: var(--muted);
   font-weight: 600;
   white-space: nowrap;
+}
+#mode label {
+  display: block;
+  flex-basis: auto;
+  min-width: 0;
+  padding-inline: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+  align-content: center;
+  font-size: 12px;
 }
 .segmented input {
   position: absolute;
@@ -3592,6 +3603,12 @@ dialog details {
                         name="mode"
                         value="transparent"
                       />Transparent</label
+                    ><label title="Recolour a reflected tint and preserve its lightness"
+                      ><input
+                        type="radio"
+                        name="mode"
+                        value="reflection"
+                      />Reflection</label
                     >
                   </fieldset>
                   <div id="targetControls" class="target-row">
@@ -3645,6 +3662,7 @@ dialog details {
                       >⚠</span
                     >
                   </p>
+                  <div id="reflectionControls" class="slider-grid" hidden></div>
                   <label class="check advanced-only" id="protectLabel"
                     ><input type="checkbox" id="protect" checked /> Protect
                     highlights and shadows</label
@@ -4398,6 +4416,7 @@ dialog details {
     shadeTol: 60,
     soft: 20,
     feather: 0,
+    reflectionStrength: 100,
     connected: false,
     dh: 0,
     ds: 0,
@@ -4600,7 +4619,7 @@ dialog details {
     for (const [key, [lo, hi]] of Object.entries(ranges))
       if (!Number.isFinite(p[key]) || p[key] < lo || p[key] > hi)
         throw Error("Invalid processing parameter: " + key);
-    if (!["shift", "flat", "transparent"].includes(p.mode) || !["oklch", "hsl"].includes(p.model) || !parseHex(p.target) || typeof p.protect !== "boolean" || typeof p.connected !== "boolean" || typeof p.cleanEdges !== "boolean")
+    if (p.reflectionStrength !== void 0 && (!Number.isFinite(p.reflectionStrength) || p.reflectionStrength < 0 || p.reflectionStrength > 100) || !["shift", "flat", "transparent", "reflection"].includes(p.mode) || !["oklch", "hsl"].includes(p.model) || !parseHex(p.target) || typeof p.protect !== "boolean" || typeof p.connected !== "boolean" || typeof p.cleanEdges !== "boolean")
       throw Error("Invalid colour operation.");
     if (p.ramp != null && (!Array.isArray(p.ramp) || p.ramp.length < 1 || p.ramp.length > 8 || p.ramp.some((v) => typeof v !== "string" || !parseHex(v))))
       throw Error("Invalid colour ramp.");
@@ -4751,15 +4770,16 @@ dialog details {
   async function selectMask(image, p, seeds2, overrides2, check, polygon = null) {
     const { width: w2, height: h2, data, ids, hsl, colours } = image, n = w2 * h2, colourCount = hsl.length / 4;
     if (polygon != null) validatePolygon(polygon, w2, h2);
-    const source = sampleSources(image, seeds2);
+    const source = sampleSources(image, seeds2), reflection = p.mode === "reflection", softness = reflection ? Math.max(20, p.soft) : p.soft;
     const weight = new Float32Array(colourCount), score = new Float32Array(colourCount).fill(SCORE_NONE), nearest = new Uint8Array(colourCount);
     if (source.length)
       for (let c = 0; c < colourCount; c++) {
         if ((c & 16383) === 0) await check();
         const o = c * 4, achro = hsl[o + 3] < NEUTRAL2;
+        if (reflection && !hsl[o + 3]) continue;
         let best = Infinity, bestAny = Infinity, distance = SCORE_NONE, match = -1, closest = 0;
         for (let k = 0; k < source.length; k++) {
-          const v = source[k].v, shade = achro ? Math.abs(hsl[o + 2] - v[2]) : Math.max(
+          const v = source[k].v, shade = achro || reflection ? Math.abs(hsl[o + 2] - v[2]) : Math.max(
             Math.abs(hsl[o + 1] - v[1]),
             Math.abs(hsl[o + 2] - v[2])
           ), any = hueDistance(hsl[o], v[0]) / 180 + shade;
@@ -4767,11 +4787,14 @@ dialog details {
             bestAny = any;
             closest = k;
           }
-          if (achro !== v[3] < NEUTRAL2) continue;
-          distance = Math.min(distance, sampleDistance(hsl, o, v));
+          if (reflection ? !v[3] : achro !== v[3] < NEUTRAL2) continue;
           const hd = hueDistance(hsl[o], v[0]);
+          distance = Math.min(
+            distance,
+            reflection ? hd / 45 + shade / 2 : sampleDistance(hsl, o, v)
+          );
           const d = Math.max(
-            achro ? 0 : p.hueTol ? hd / p.hueTol : hd < 0.5 ? 0 : Infinity,
+            achro && !reflection ? 0 : p.hueTol ? hd / p.hueTol : hd < 0.5 ? 0 : Infinity,
             p.shadeTol ? shade / (p.shadeTol / 100) : shade < 4e-3 ? 0 : Infinity
           );
           if (d < best) {
@@ -4782,7 +4805,7 @@ dialog details {
         nearest[c] = match >= 0 ? match : closest;
         score[c] = distance;
         if (best <= 1)
-          weight[c] = p.soft ? Math.min(1, (1 - best) / (p.soft / 100)) : 1;
+          weight[c] = softness ? Math.min(1, (1 - best) / (softness / 100)) : 1;
       }
     const mask = new Float32Array(n);
     for (let i = 0; i < n; i++) {
@@ -4856,6 +4879,7 @@ dialog details {
       if ((i & 16383) === 0) await check();
       if (data[i * 4 + 3]) opaque++;
       if (inside && !inside[i] && overrides2[i] <= 0) mask[i] = 0;
+      if (reflection && overrides2[i] < 0) mask[i] = 0;
       if (mask[i] > 0) count++;
     }
     return { mask, weight, score, nearest, source, count, opaque, inside };
@@ -4921,6 +4945,14 @@ dialog details {
       );
     };
     return { shift, capped: rawS !== ts || rawL !== tl };
+  }
+  function reflectionTinter(target) {
+    const [, , hue] = rgbToOklch(...target), angle = hue * Math.PI / 180, targetA = Math.cos(angle), targetB = Math.sin(angle), neutral2 = Math.max(...target) === Math.min(...target);
+    return (rgb, weight) => {
+      if (rgb[0] === rgb[1] && rgb[1] === rgb[2]) return rgb;
+      const [light, chroma, hue2] = rgbToOklch(...rgb), angle2 = hue2 * Math.PI / 180, targetWeight = neutral2 ? 0 : weight, a = chroma * (Math.cos(angle2) * (1 - weight) + targetA * targetWeight), b = chroma * (Math.sin(angle2) * (1 - weight) + targetB * targetWeight);
+      return oklchToRgb(light, Math.hypot(a, b), Math.atan2(b, a) * 180 / Math.PI);
+    };
   }
   function unmix(rgb, key) {
     let a = 0;
@@ -5030,20 +5062,23 @@ dialog details {
   var BLEND_REACH = 2;
   var BLEND_WINDOW = 3;
   async function reblend(image, rows, owner, out, check) {
-    const { width: w2, height: h2, data } = image, opaque = rows.map((r) => r.params.mode !== "transparent"), fixes = [];
+    const { width: w2, height: h2, data } = image, blendable = rows.map(
+      (r) => r.params.mode !== "transparent" && r.params.mode !== "reflection"
+    ), fixes = [];
+    if (blendable.filter(Boolean).length < 2) return;
     const colour = (j, k) => data[j * 4 + k];
     for (let y = 0; y < h2; y++) {
       if ((y & 15) === 0) await check();
       for (let x = 0; x < w2; x++) {
         const i = y * w2 + x, a = owner[i];
-        if (a < 0 || !opaque[a]) continue;
+        if (a < 0 || !blendable[a]) continue;
         let b = -1;
         for (let dy = -BLEND_REACH; dy <= BLEND_REACH && b < 0; dy++)
           for (let dx = -BLEND_REACH; dx <= BLEND_REACH; dx++) {
             const xx = x + dx, yy = y + dy;
             if (xx < 0 || yy < 0 || xx >= w2 || yy >= h2) continue;
             const o = owner[yy * w2 + xx];
-            if (o >= 0 && o !== a && opaque[o]) {
+            if (o >= 0 && o !== a && blendable[o]) {
               b = o;
               break;
             }
@@ -5119,7 +5154,7 @@ dialog details {
   async function editRow(image, p, seeds2, overrides2, check, polygon = null, weightsOnly = false) {
     const { width: w2, height: h2, data, ids, colours } = image, n = w2 * h2;
     const sel = await selectMask(image, p, seeds2, overrides2, check, polygon), { mask, inside } = sel;
-    const effective = new Float32Array(n), target = parseHex(p.target), anchor = p.mode === "shift" && sel.count ? p.matchTarget ? await recipeAnchor(image, sel, check) : anchorColour(image, sel) : null, unmixing = p.mode === "transparent" && p.cleanEdges && sel.source.length, cache = /* @__PURE__ */ new Map();
+    const effective = new Float32Array(n), target = parseHex(p.target), reflection = p.mode === "reflection", strength = reflection ? (p.reflectionStrength ?? 100) / 100 : 1, tint = reflection && !weightsOnly ? reflectionTinter(target) : null, anchor = p.mode === "shift" && sel.count ? p.matchTarget ? await recipeAnchor(image, sel, check) : anchorColour(image, sel) : null, unmixing = p.mode === "transparent" && p.cleanEdges && sel.source.length, cache = /* @__PURE__ */ new Map();
     let shift, capped = false;
     const adjustment = anchor && p.matchTarget ? { ...p, ...deltasFor(anchor, target, p.model) } : p;
     if (!weightsOnly && anchor && !p.ramp?.length && !adjustment.dh && !adjustment.ds && !adjustment.dl)
@@ -5153,6 +5188,14 @@ dialog details {
         cache.set(id, out);
       }
       return out;
+    };
+    const tintAt = (c, weight) => {
+      let entry = cache.get(c);
+      if (entry?.weight !== weight) {
+        entry = { weight, rgb: tint(colours.subarray(c * 3, c * 3 + 3), weight) };
+        cache.set(c, entry);
+      }
+      return entry.rgb;
     };
     const band = new Int8Array(unmixing ? n : 0).fill(-1);
     if (unmixing)
@@ -5200,7 +5243,7 @@ dialog details {
     if (weightsOnly) {
       for (let i = 0; i < n; i++) {
         if ((i & 16383) === 0) await check();
-        effective[i] = unmixing && band[i] >= 0 || full[i] ? 1 : mask[i];
+        effective[i] = unmixing && band[i] >= 0 || full[i] ? 1 : mask[i] * strength;
       }
       return { weight: effective, score: sel.score };
     }
@@ -5208,7 +5251,7 @@ dialog details {
     let changed = 0;
     for (let i = 0; i < n; i++) {
       if ((i & 16383) === 0) await check();
-      const edge = unmixing && band[i] >= 0, weight = edge || full[i] ? 1 : mask[i];
+      const edge = unmixing && band[i] >= 0, weight = edge || full[i] ? 1 : mask[i] * strength;
       if (weight <= 0) continue;
       effective[i] = weight;
       const o = i * 4;
@@ -5222,6 +5265,8 @@ dialog details {
           pixels2[o + 3] = Math.round(data[o + 3] * alpha);
         } else pixels2[o + 3] = Math.round(data[o + 3] * (1 - weight));
         if (!pixels2[o + 3]) pixels2.fill(0, o, o + 4);
+      } else if (reflection) {
+        pixels2.set(tintAt(ids[i], weight), o);
       } else {
         const rgb = transform(ids[i]);
         for (let c = 0; c < 3; c++)
@@ -6982,13 +7027,18 @@ dialog details {
   var MAX_RECIPE_BYTES = 64 * 1024;
   var MAX_STEPS = 32;
   var NUMBERS = ["hueTol", "shadeTol", "soft", "feather", "dh", "ds", "dl"];
-  var CHOICES = { mode: ["shift", "flat", "transparent"], model: ["oklch", "hsl"] };
+  var CHOICES = {
+    mode: ["shift", "flat", "transparent", "reflection"],
+    model: ["oklch", "hsl"]
+  };
   var FLAGS = ["protect", "cleanEdges"];
   function cleanParams(source) {
     if (!source || typeof source !== "object" || Array.isArray(source))
       throw Error("A recipe row has no settings.");
     const p = defaults();
     for (const key of NUMBERS) if (key in source) p[key] = Number(source[key]);
+    if ("reflectionStrength" in source)
+      p.reflectionStrength = Number(source.reflectionStrength);
     for (const [key, options] of Object.entries(CHOICES))
       if (key in source)
         p[key] = options.includes(source[key]) ? source[key] : "";
@@ -7006,6 +7056,7 @@ dialog details {
     const out = {};
     for (const key of [...NUMBERS, ...Object.keys(CHOICES), ...FLAGS, "target"])
       out[key] = p[key];
+    if (p.mode === "reflection") out.reflectionStrength = p.reflectionStrength ?? 100;
     if (p.ramp) out.ramp = p.ramp.slice();
     if (p.matchTarget === true) out.matchTarget = true;
     return out;
@@ -7244,7 +7295,16 @@ dialog details {
     if (!source || typeof source !== "object" || Array.isArray(source))
       throw Error("A session row has no settings.");
     const p = defaults();
-    for (const key of ["hueTol", "shadeTol", "soft", "feather", "dh", "ds", "dl"])
+    for (const key of [
+      "hueTol",
+      "shadeTol",
+      "soft",
+      "feather",
+      "reflectionStrength",
+      "dh",
+      "ds",
+      "dl"
+    ])
       if (key in source) p[key] = Number(source[key]);
     if ("mode" in source) p.mode = source.mode;
     if ("model" in source) p.model = source.model;
@@ -10746,7 +10806,7 @@ dialog details {
   // src/app.js
   var $ = (id) => document.getElementById(id);
   var pause = makePause();
-  var VERSION = "0.1.6";
+  var VERSION = "0.1.7";
   var w = 0;
   var h = 0;
   var name = "";
@@ -11281,6 +11341,15 @@ dialog details {
     ["feather", "Spatial feather", 0, 8, "pixels", "Feather"]
   ])
     makeSlider("refinementSliders", ...args);
+  makeSlider(
+    "reflectionControls",
+    "reflectionStrength",
+    "Reflection strength",
+    0,
+    100,
+    "percent",
+    "Strength"
+  );
   $("refinementSliders").addEventListener("focusin", () => {
     $("refinementHelp").hidden = false;
   });
@@ -11615,6 +11684,7 @@ dialog details {
     $("adjustPanel").hidden = params.mode !== "shift";
     $("protectLabel").hidden = params.mode !== "shift";
     $("cleanEdgesLabel").hidden = !transparent;
+    $("reflectionControls").hidden = params.mode !== "reflection";
     const dsName = params.model === "hsl" ? "Saturation" : "Chroma";
     $("dsLabel").textContent = dsName;
     $("ds").setAttribute("aria-label", dsName);
@@ -11633,6 +11703,7 @@ dialog details {
         "shadeTol",
         "soft",
         "feather",
+        "reflectionStrength",
         "dh",
         "ds",
         "dl"
@@ -11705,7 +11776,7 @@ dialog details {
     let url;
     try {
       url = URL.createObjectURL(
-        new Blob(['(()=>{var D=(t,e,n)=>Math.min(n,Math.max(e,t)),X=(t,e)=>Math.abs((t-e+540)%360-180),Q=(t,e)=>(t-e+540)%360-180;function L(t,e,n){t/=255,e/=255,n/=255;let o=Math.max(t,e,n),i=Math.min(t,e,n),r=o-i,a=(o+i)/2,s=0;return r&&(s=o===t?(e-n)/r%6:o===e?(n-t)/r+2:(t-e)/r+4),[(s*60+360)%360,r?r/(1-Math.abs(2*a-1)):0,a,r]}function Et(t,e,n){t=(t%360+360)%360,e=D(e,0,1),n=D(n,0,1);let o=(1-Math.abs(2*n-1))*e,i=o*(1-Math.abs(t/60%2-1)),r=n-o/2,[a,s,c]=t<60?[o,i,0]:t<120?[i,o,0]:t<180?[0,o,i]:t<240?[0,i,o]:t<300?[i,0,o]:[o,0,i];return[a,s,c].map(d=>Math.round((d+r)*255))}function H(t){let e=String(t).trim().replace(/^#/,"");return/^[\\da-f]{3}$/i.test(e)&&(e=[...e].map(n=>n+n).join("")),/^[\\da-f]{6}$/i.test(e)?[0,2,4].map(n=>parseInt(e.slice(n,n+2),16)):null}var at=(t,e,n)=>"#"+[t,e,n].map(o=>D(Math.round(o),0,255).toString(16).padStart(2,"0")).join("").toUpperCase(),J=Float32Array.from({length:256},(t,e)=>{let n=e/255;return n<=.04045?n/12.92:((n+.055)/1.055)**2.4}),Nt=t=>255*(t<=.0031308?12.92*t:1.055*Math.max(0,t)**(1/2.4)-.055);function Ft(t,e,n){let o=J[t],i=J[e],r=J[n],a=Math.cbrt(.4122214708*o+.5363325363*i+.0514459929*r),s=Math.cbrt(.2119034982*o+.6806995451*i+.1073969566*r),c=Math.cbrt(.0883024619*o+.2817188376*i+.6299787005*r),d=.2104542553*a+.793617785*s-.0040720468*c,f=1.9779984951*a-2.428592205*s+.4505937099*c,p=.0259040371*a+.7827717662*s-.808675766*c;return[d,Math.hypot(f,p),(Math.atan2(p,f)*180/Math.PI+360)%360]}function Y(t,e,n){let o=e*Math.cos(n*Math.PI/180),i=e*Math.sin(n*Math.PI/180),r=(t+.3963377774*o+.2158037573*i)**3,a=(t-.1055613458*o-.0638541728*i)**3,s=(t-.0894841775*o-1.291485548*i)**3;return[4.0767416621*r-3.3077115913*a+.2309699292*s,-1.2684380046*r+2.6097574011*a-.3413193965*s,-.0041960863*r-.7034186147*a+1.707614701*s]}var ot=t=>t.every(e=>e>=-1e-4&&e<=1+1e-4);function Tt(t,e,n){t=D(t,0,1),e=Math.max(0,e);let o=Y(t,e,n);if(!ot(o)){let i=0,r=e;for(let a=0;a<16;a++){let s=(i+r)/2;ot(Y(t,s,n))?i=s:r=s}o=Y(t,i,n)}return o.map(i=>D(Math.round(Nt(i)),0,255))}var it=.4;function q(t,e){if(e==="hsl"){let[r,a,s]=L(...t);return[r,a,s]}let[n,o,i]=Ft(...t);return[i,Math.min(1,o/it),n]}var B=(t,e,n,o)=>o==="hsl"?Et(t,e,n):Tt(n,e*it,t);function G(t,e,n){let[o,i,r]=q(t,n),[a,s,c]=q(e,n);return{dh:Q(a,o),ds:(s-i)*100,dl:(c-r)*100}}function Z(t,e,n){return t<=e?e>0?t*n/e:n:e<1?n+(t-e)*(1-n)/(1-e):n}var st=(t,e,n)=>n<e?t*n/e:Z(t,e,n);var St=.06;function vt(t,e){let n=t.length,o=[],i=new Array(n);for(let r=0;r<n-1;r++)o.push((e[r+1]-e[r])/(t[r+1]-t[r]));i[0]=o[0],i[n-1]=o[n-2];for(let r=1;r<n-1;r++)i[r]=o[r-1]*o[r]>0?(o[r-1]+o[r])/2:0;for(let r=0;r<n-1;r++){if(o[r]===0){i[r]=i[r+1]=0;continue}let a=i[r]/o[r],s=i[r+1]/o[r],c=a*a+s*s;if(c>9){let d=3/Math.sqrt(c);i[r]=d*a*o[r],i[r+1]=d*s*o[r]}}return r=>{if(r<=t[0])return e[0];if(r>=t[n-1])return e[n-1];let a=0;for(;r>t[a+1];)a++;let s=t[a+1]-t[a],c=(r-t[a])/s,d=c*c,f=d*c;return(2*f-3*d+1)*e[a]+(f-2*d+c)*s*i[a]+(3*d-2*f)*e[a+1]+(f-d)*s*i[a+1]}}function tt(t,e){return n=>{if(n<=t[0])return e[0];let o=t.length;if(n>=t[o-1])return e[o-1];let i=0;for(;n>t[i+1];)i++;return e[i]+(e[i+1]-e[i])*(n-t[i])/(t[i+1]-t[i])}}function Rt(t,e){let n=[...t].sort((a,s)=>a.l-s.l),o=n.reduce((a,s)=>a+s.weight,0);if(!o)return[];let i=[];for(let a=0,s=0,c=0;a<e;a++){let d=0,f=0,p=o*(a+1)/e;for(;c<n.length&&s+n[c].weight/2<=p;c++)d+=n[c].l*n[c].weight,f+=n[c].weight,s+=n[c].weight;f&&i.push(d/f)}let r=[];for(let a=0;a<32;a++){r=i.map(()=>[]);for(let d of n){let f=0;for(let p=1;p<i.length;p++)Math.abs(d.l-i[p])<Math.abs(d.l-i[f])&&(f=p);r[f].push(d)}r=r.filter(d=>d.length);let s=r.map(d=>d.reduce((f,p)=>f+p.l*p.weight,0)/d.reduce((f,p)=>f+p.weight,0)),c=s.length===i.length&&s.every((d,f)=>d===i[f]);if(i=s,c)break}return r.map(lt)}function lt(t){let e=t.reduce((a,s)=>a+s.weight,0),n=0,o=0,i=0,r=0;for(let a of t){let s=a.h*Math.PI/180,c=a.weight*Math.max(a.s,1e-6);n+=Math.cos(s)*c,o+=Math.sin(s)*c,i+=a.l*a.weight,r+=a.s*a.weight}return{h:(Math.atan2(o,n)*180/Math.PI+360)%360,s:r/e,l:i/e,weight:e,neutral:t.every(a=>a.neutral),members:t}}function ft(t,e,n){let o=t.ramp.map(I=>q(H(I),t.model)).sort((I,k)=>I[2]-k[2]),i=Rt(e,o.length),r=[];for(let I of i)r.length&&I.l-r.at(-1).l<1/255?r.push(lt([...r.pop().members,...I.members])):r.push(I);if(r.length<2)return null;let a=r.length,s=r.map((I,k)=>o[Math.round(k*(o.length-1)/(a-1))]),c=r.map(I=>I.l),d=s.map(I=>I[2]),f=[],p=[];c[0]>0&&(f.push(0),p.push(0)),f.push(...c),p.push(...d),c.at(-1)<1&&(f.push(1),p.push(1));let y=vt(f,p),x=r.every(I=>I.neutral),g=[];r.forEach((I,k)=>{let T=x?s[k][0]:Q(s[k][0],I.h);if(k){for(;T-g[k-1]>180;)T-=360;for(;T-g[k-1]<-180;)T+=360}g.push(T)});let E=tt(c,g),R=x?tt(c,s.map(I=>I[1])):tt(c,s.map((I,k)=>Math.log(D(I[1]/Math.max(r[k].s,.01),1/64,64))));return I=>{let[k,T,S]=q(I,t.model);return B(x?E(S):k+E(S),x?D(R(S),0,1):D(T*Math.exp(R(S)),0,1),D(y(S),0,1),t.model)}}function ct(t,e,n){let o=[];for(let i=0;i<e.length;i++)if(e[i]>0){let r=[t[i*3],t[i*3+1],t[i*3+2]],[a,s,c]=q(r,n);o.push({h:a,s,l:c,weight:e[i],neutral:L(...r)[3]<St})}return o}var ut=(t,e)=>G(e,H(t.ramp[0]),t.model);var Ut=4194304,K=.06,Dt=2,Pt=.2;function _t(t,e,n){if(!Number.isInteger(t)||!Number.isInteger(e)||t<1||e<1||t>8192||e>8192||t*e>Ut||!(n instanceof Uint8ClampedArray)||n.length!==t*e*4)throw Error("Invalid image dimensions or pixel buffer.")}var jt=16,pt=64,Ct=128,gt=.12,ht=4*gt,dt=99;function Ot(t,e,n){if(!Array.isArray(t)||t.length>pt||t.some(o=>typeof o?.hex=="string"?!/^#[\\dA-F]{6}$/i.test(o.hex):!Number.isInteger(o?.x)||!Number.isInteger(o.y)||o.x<0||o.y<0||o.x>=e||o.y>=n))throw Error("Invalid colour samples.")}function qt(t){let e={hueTol:[0,180],shadeTol:[0,100],soft:[0,100],feather:[0,8],dh:[-180,180],ds:[-100,100],dl:[-100,100]};for(let[n,[o,i]]of Object.entries(e))if(!Number.isFinite(t[n])||t[n]<o||t[n]>i)throw Error("Invalid processing parameter: "+n);if(!["shift","flat","transparent"].includes(t.mode)||!["oklch","hsl"].includes(t.model)||!H(t.target)||typeof t.protect!="boolean"||typeof t.connected!="boolean"||typeof t.cleanEdges!="boolean")throw Error("Invalid colour operation.");if(t.ramp!=null&&(!Array.isArray(t.ramp)||t.ramp.length<1||t.ramp.length>8||t.ramp.some(n=>typeof n!="string"||!H(n))))throw Error("Invalid colour ramp.")}function yt(t,e,n){if(!Array.isArray(t)||t.length<3||t.length>Ct||t.some(o=>!Number.isInteger(o?.x)||!Number.isInteger(o?.y)||o.x<0||o.y<0||o.x>=e||o.y>=n))throw Error("Invalid polygon.")}function Ht(t,e,n){let o=new Uint8Array(t*e),i=n.length;if(i<3)return o;let r=c=>c.x+.5,a=c=>c.y+.5,s=(c,d)=>{c>=0&&d>=0&&c<t&&d<e&&(o[d*t+c]=1)};for(let c=0;c<i;c++)s(n[c].x,n[c].y);for(let c=0;c<e;c++){let d=c+.5,f=[];for(let p=0;p<i;p++){let y=n[p],x=n[(p+1)%i],g=a(y),E=a(x),R=r(y),I=r(x);if(g===E){if(g===d){let k=Math.min(y.x,x.x),T=Math.max(y.x,x.x);for(let S=k;S<=T;S++)s(S,c)}continue}g>d!=E>d&&f.push(R+(d-g)*(I-R)/(E-g))}f.sort((p,y)=>p-y);for(let p=0;p+1<f.length;p+=2){let y=Math.ceil(f[p]-.5-1e-8),x=Math.floor(f[p+1]-.5+1e-8);for(let g=Math.max(0,y);g<=Math.min(t-1,x);g++)s(g,c)}}return o}function Lt(t,e,n,o,i){if(!Array.isArray(t)||t.length<1||t.length>jt)throw Error("Invalid colour map.");let r=new Set,a=0;for(let s of t){if(!Number.isInteger(s?.id)||s.id<1||s.id>127||r.has(s.id))throw Error("Invalid colour map.");r.add(s.id),qt(s.params),Ot(s.seeds,o,i),s.polygon!=null&&yt(s.polygon,o,i),a+=s.seeds.length}if(a>pt)throw Error("Invalid colour samples.");if(!Number.isInteger(n)||n<0||n>=t.length)throw Error("Invalid colour map.");if(!(e instanceof Int8Array)||e.length!==o*i)throw Error("Invalid selection buffer.");for(let s=0;s<e.length;s++)if(e[s]&&e[s]!==-1&&!r.has(e[s]))throw Error("Invalid brush override.")}async function wt(t,e,n,o=async()=>{},i=()=>!1){_t(t,e,n);let r=t*e,a=new Int32Array(r),s=[],c=new Map,d=r>1<<20,f=d?new Int32Array(1<<24):new Map,p=0;for(let g=0;g<r;g++){if((g&16383)===0&&(await o(),i()))throw Error("Cancelled");let E=g*4;if(!n[E+3]){a[g]=-1;continue}let R=n[E]<<16|n[E+1]<<8|n[E+2],I=(d?f[R]:f.get(R))||0;I||(I=++p,d?f[R]=I:f.set(R,I),s.push(n[E],n[E+1],n[E+2])),a[g]=I-1;let k=(n[E]>>4)*256+(n[E+1]>>4)*16+(n[E+2]>>4),T=c.get(k);T?T.weight+=n[E+3]:c.set(k,{weight:n[E+3],x:g%t,y:Math.floor(g/t),hex:at(...n.subarray(E,E+3))})}let y=Uint8Array.from(s),x=new Float32Array(p*4);for(let g=0;g<p;g++){if((g&16383)===0&&(await o(),i()))throw Error("Cancelled");x.set(L(y[g*3],y[g*3+1],y[g*3+2]),g*4)}return{width:t,height:e,data:n,ids:a,colours:y,hsl:x,palette:[...c.values()].sort((g,E)=>E.weight-g.weight).slice(0,12)}}function Kt(t,e){let{width:n,ids:o,hsl:i,colours:r}=t,a=[];for(let s of e){if(typeof s.hex=="string"){let f=H(s.hex);a.push({i:-1,rgb:f,v:Float32Array.from(L(...f))});continue}let c=s.y*n+s.x,d=o[c];d>=0&&a.push({i:c,rgb:[r[d*3],r[d*3+1],r[d*3+2]],v:i.subarray(d*4,d*4+4)})}return a}function xt(t,e,n){if(t[e+3]<K)return Math.abs(t[e+2]-n[2])/2;let o=Math.max(Math.abs(t[e+1]-n[1]),Math.abs(t[e+2]-n[2]));return X(t[e],n[0])/45+o/2}async function Wt(t,e,n,o,i,r=null){let{width:a,height:s,data:c,ids:d,hsl:f,colours:p}=t,y=a*s,x=f.length/4;r!=null&&yt(r,a,s);let g=Kt(t,n),E=new Float32Array(x),R=new Float32Array(x).fill(dt),I=new Uint8Array(x);if(g.length)for(let w=0;w<x;w++){(w&16383)===0&&await i();let F=w*4,U=f[F+3]<K,l=1/0,h=1/0,m=dt,u=-1,N=0;for(let b=0;b<g.length;b++){let A=g[b].v,M=U?Math.abs(f[F+2]-A[2]):Math.max(Math.abs(f[F+1]-A[1]),Math.abs(f[F+2]-A[2])),v=X(f[F],A[0])/180+M;if(v<h&&(h=v,N=b),U!==A[3]<K)continue;m=Math.min(m,xt(f,F,A));let P=X(f[F],A[0]),O=Math.max(U?0:e.hueTol?P/e.hueTol:P<.5?0:1/0,e.shadeTol?M/(e.shadeTol/100):M<.004?0:1/0);O<l&&(l=O,u=b)}I[w]=u>=0?u:N,R[w]=m,l<=1&&(E[w]=e.soft?Math.min(1,(1-l)/(e.soft/100)):1)}let k=new Float32Array(y);for(let w=0;w<y;w++)(w&16383)===0&&await i(),d[w]>=0&&(k[w]=E[d[w]]);let T=r?Ht(a,s,r):null;if(T)for(let w=0;w<y;w++)(w&16383)===0&&await i(),T[w]||(k[w]=0);if(e.connected&&g.length){let w=new Uint8Array(y),F=new Int32Array(y),U=0,l=0;for(let{i:h}of g)h>=0&&k[h]>0&&!w[h]&&(w[h]=1,F[l++]=h);for(;U<l;){(U&16383)===0&&await i();let h=F[U++],m=h%a,u=Math.floor(h/a);for(let N=-1;N<=1;N++)for(let b=-1;b<=1;b++){let A=m+b,M=u+N,v=M*a+A;A>=0&&A<a&&M>=0&&M<s&&!w[v]&&k[v]>0&&(w[v]=1,F[l++]=v)}}for(let h=0;h<y;h++)(h&16383)===0&&await i(),w[h]||(k[h]=0)}for(let w=0;w<y;w++){if((w&16383)===0&&await i(),o[w]!==0&&o[w]!==1&&o[w]!==-1)throw Error("Invalid brush override.");o[w]&&(k[w]=c[w*4+3]&&o[w]>0?1:0)}let S=Math.round(e.feather);if(S){let w=new Float32Array(y);for(let F=0;F<s;F++){(F&15)===0&&await i();let U=0;for(let l=-S;l<=S;l++)U+=k[F*a+D(l,0,a-1)];for(let l=0;l<a;l++)w[F*a+l]=U/(S*2+1),U+=k[F*a+D(l+S+1,0,a-1)]-k[F*a+D(l-S,0,a-1)]}for(let F=0;F<a;F++){(F&15)===0&&await i();let U=0;for(let l=-S;l<=S;l++)U+=w[D(l,0,s-1)*a+F];for(let l=0;l<s;l++)k[l*a+F]=c[(l*a+F)*4+3]?U/(S*2+1):0,U+=w[D(l+S+1,0,s-1)*a+F]-w[D(l-S,0,s-1)*a+F]}}let _=0,j=0;for(let w=0;w<y;w++)(w&16383)===0&&await i(),c[w*4+3]&&j++,T&&!T[w]&&o[w]<=0&&(k[w]=0),k[w]>0&&_++;return{mask:k,weight:E,score:R,nearest:I,source:g,count:_,opaque:j,inside:T}}async function mt(t,e,n,o){let i=t*e,r=new Uint8Array(i);for(let a=0;a<i;a++)(a&16383)===0&&await o(),n(a)&&(r[a]=1);for(let a=2;a<=Dt+1;a++)for(let s=0;s<i;s++){if((s&16383)===0&&await o(),r[s])continue;let c=s%t,d=(s-c)/t;for(let f=-1;f<=1&&!r[s];f++)for(let p=-1;p<=1;p++){let y=c+p,x=d+f,g=x*t+y;if(y>=0&&y<t&&x>=0&&x<e&&r[g]&&r[g]<a){r[s]=a;break}}}return r}function Mt(t,e){let{data:n}=t;if(e.source.length)return e.source.at(-1).rgb;let o=[0,0,0],i=0;for(let r=0;r<e.mask.length;r++)if(e.mask[r]>0){for(let a=0;a<3;a++)o[a]+=n[r*4+a]*e.mask[r];i+=e.mask[r]}return i?o.map(r=>Math.round(r/i)):null}async function $t(t,e,n){let o=-1,i=-1,r=1/0;for(let a=0;a<e.weight.length;a++){(a&16383)===0&&await n();let s=e.nearest[a];if(!e.weight[a]||s<i)continue;let c=xt(t.hsl,a*4,e.source[s].v);(s>i||c<r)&&(o=a,i=s,r=c)}return o<0?Mt(t,e):t.colours.subarray(o*3,o*3+3)}function Xt(t,e){let[n,o,i]=q(e,t.model),r=L(...e)[3]<K,a=o+t.ds/100,s=i+t.dl/100,c=D(a,0,1),d=D(s,0,1),f=n+t.dh;return{shift:y=>{let[,x,g]=q(y,t.model);return B(f,r?c:t.protect?st(x,o,c):D(x+t.ds/100,0,1),t.protect?Z(g,i,d):D(g+t.dl/100,0,1),t.model)},capped:a!==c||s!==d}}function Bt(t,e){let n=0;for(let o=0;o<3;o++){let i=t[o]/255,r=e[o]/255;i>r?n=Math.max(n,(i-r)/(1-r)):i<r&&(n=Math.max(n,(r-i)/r))}return n=Math.round(n*255)/255,n?[...[0,1,2].map(o=>D(Math.round((t[o]-(1-n)*e[o])/n),0,255)),n]:[0,0,0,0]}var Gt=(t,e)=>async()=>{if(await t(),e())throw Error("Cancelled")};async function bt(t,e,n,o,i=async()=>{},r=()=>!1){let{width:a,height:s,data:c,ids:d}=t,f=a*s;Lt(e,n,o,a,s);let p=Gt(i,r),y=new Uint8ClampedArray(c),x=new Float32Array(4*f),g=new Float32Array(f),E=new Float32Array(f),R=new Float32Array(f),I=new Uint8Array(f),k=new Int8Array(f).fill(-1),T=new Int8Array(f),S=[],_=e.map((l,h)=>({index:h,key:JSON.stringify([l.seeds,l.params,l.polygon])}));_.sort((l,h)=>l.key<h.key?-1:l.key>h.key?1:0);let j=async(l,h=!1)=>{let m=e[l];for(let u=0;u<f;u++)(u&16383)===0&&await p(),T[u]=n[u]===m.id?1:n[u]?-1:0;return zt(t,m.params,m.seeds,T,p,m.polygon,h)},w=e.length>2;if(w){E.fill(1/0);for(let{index:l}of _){let h=await j(l,!0);for(let m=0;m<f;m++)(m&16383)===0&&await p(),h.weight[m]>0&&(E[m]=Math.min(E[m],T[m]===1||d[m]<0?0:h.score[d[m]]))}}let F=null;for(let{index:l}of _){let h=await j(l);S[l]=h.count,l===o&&(F=h);for(let m=0;m<f;m++){(m&16383)===0&&await p();let u=h.weight[m];if(!(u>0))continue;let N=T[m]===1||d[m]<0?0:h.score[d[m]],b=m*4;if((w||I[m])&&N>E[m]+ht)continue;!w&&(!I[m]||N<E[m]-ht)&&(E[m]=N,I[m]=0,g[m]=R[m]=0);let A=u*Math.exp(-(N-E[m])/gt);if(!I[m]){y.set(h.pixels.subarray(b,b+4),b);for(let M=0;M<4;M++)x[b+M]=0}I[m]++;for(let M=0;M<4;M++)x[b+M]+=A*h.pixels[b+M];g[m]+=A,A>R[m]&&(R[m]=A,k[m]=l)}}for(let l=0;l<f;l++)if((l&16383)===0&&await p(),I[l]>1&&g[l]>0)for(let h=0;h<4;h++)y[l*4+h]=x[l*4+h]/g[l];e.length>1&&await Vt(t,e,k,y,p);let U=0;for(let l=0;l<f;l++){(l&16383)===0&&await p();let h=l*4;(y[h]!==c[h]||y[h+1]!==c[h+1]||y[h+2]!==c[h+2]||y[h+3]!==c[h+3])&&U++}return{pixels:y,mask:F.mask,owner:k,counts:S,count:F.count,opaque:F.opaque,changed:U,capped:F.capped}}var V=2,z=3;async function Vt(t,e,n,o,i){let{width:r,height:a,data:s}=t,c=e.map(p=>p.params.mode!=="transparent"),d=[],f=(p,y)=>s[p*4+y];for(let p=0;p<a;p++){(p&15)===0&&await i();for(let y=0;y<r;y++){let x=p*r+y,g=n[x];if(g<0||!c[g])continue;let E=-1;for(let l=-V;l<=V&&E<0;l++)for(let h=-V;h<=V;h++){let m=y+h,u=p+l;if(m<0||u<0||m>=r||u>=a)continue;let N=n[u*r+m];if(N>=0&&N!==g&&c[N]){E=N;break}}if(E<0)continue;let R=[[],[]];for(let l=-z;l<=z;l++)for(let h=-z;h<=z;h++){let m=y+h,u=p+l;if(m<0||u<0||m>=r||u>=a)continue;let N=u*r+m;s[N*4+3]&&(n[N]===g?R[0].push(N):n[N]===E&&R[1].push(N))}let I=-1,k=-1;for(let l of R[1]){let h=0;for(let m=0;m<3;m++)h+=(f(l,m)-f(x,m))**2;h>k&&(k=h,I=l)}let T=-1,S=0,_=0;for(let l of R[0]){let h=[0,1,2].map(b=>f(l,b)-f(I,b)),m=h[0]**2+h[1]**2+h[2]**2;if(m<3*32**2)continue;let u=0;for(let b=0;b<3;b++)u+=(f(x,b)-f(I,b))*h[b];if(u/=m,u>.97||u<.03)continue;let N=0;for(let b=0;b<3;b++)N+=(f(x,b)-(f(I,b)+u*h[b]))**2;N<=.04*m&&m>_&&(T=l,S=u,_=m)}if(T<0)continue;let j=[0,1,2].map(l=>f(T,l)),w=l=>{let h=0;for(let m=0;m<3;m++)h+=(f(l,m)-j[m])**2;return h},F=!1;for(let l=-1;l<=1&&!F;l++)for(let h=-1;h<=1;h++){let m=y+h,u=p+l,N=u*r+m;if(m>=0&&u>=0&&m<r&&u<a&&n[N]===g&&s[N*4+3]&&w(N)<w(x)-.01*_){F=!0;break}}if(!F)continue;let U=!0;for(let l=0;l<3;l++)U&&=o[T*4+l]===f(T,l)&&o[I*4+l]===f(I,l);U||d.push(x,...[0,1,2].map(l=>o[T*4+l]*S+o[I*4+l]*(1-S)))}}for(let p=0;p<d.length;p+=4)for(let y=0;y<3;y++)o[d[p]*4+y]=d[p+1+y]}async function zt(t,e,n,o,i,r=null,a=!1){let{width:s,height:c,data:d,ids:f,colours:p}=t,y=s*c,x=await Wt(t,e,n,o,i,r),{mask:g,inside:E}=x,R=new Float32Array(y),I=H(e.target),k=e.mode==="shift"&&x.count?e.matchTarget?await $t(t,x,i):Mt(t,x):null,T=e.mode==="transparent"&&e.cleanEdges&&x.source.length,S=new Map,_,j=!1,w=k&&e.matchTarget?{...e,...G(k,I,e.model)}:e;if(!a&&k&&!e.ramp?.length&&!w.dh&&!w.ds&&!w.dl)_=u=>u;else if(k&&!a){let u=null;if(e.ramp?.length>1){let N=new Float64Array(p.length/3);for(let b=0;b<y;b++)(b&16383)===0&&await i(),g[b]>0&&f[b]>=0&&(N[f[b]]+=g[b]);u=ft(e,ct(p,N,e.model))}u?_=u:{shift:_,capped:j}=Xt(e.ramp?.length?{...e,...ut(e,k)}:w,k)}let F=(u,N=x.nearest[u])=>{let b=u*64+N,A=S.get(b);if(!A){let M=[p[u*3],p[u*3+1],p[u*3+2]];e.mode==="flat"?A=I:T?A=Bt(M,x.source[N].rgb):A=_(M),S.set(b,A)}return A},U=new Int8Array(T?y:0).fill(-1);if(T)for(let u=0;u<y;u++){if((u&16383)===0&&await i(),g[u]>0||E&&!E[u]||f[u]<0||o[u]<0||x.weight[f[u]]>0)continue;let N=u%s,b=(u-N)/s;for(let A=-1;A<=1&&U[u]<0;A++)for(let M=-1;M<=1;M++){let v=N+M,P=b+A,O=P*s+v;if(v>=0&&v<s&&P>=0&&P<c&&g[O]>0&&f[O]>=0){U[u]=x.nearest[f[O]];break}}}let l=new Uint8Array(k&&e.mode==="shift"&&x.source.length&&!e.feather?y:0);if(l.length){let{hsl:u}=t,N=new Uint8Array(u.length/4),b=await mt(s,c,M=>g[M]>0,i),A=await mt(s,c,M=>f[M]>=0&&(u[f[M]*4+3]<K||u[f[M]*4+2]<Pt),i);for(let M=0;M<N.length;M++){(M&16383)===0&&await i();let v=M*4,P=x.source[x.nearest[M]].v;if(u[v+3]<K||P[3]<K)continue;let O=X(u[v],P[0]),nt=Math.max(Math.abs(u[v+1]-P[1]),Math.abs(u[v+2]-P[2])),rt=e.hueTol?O/e.hueTol:O<.5?0:1/0,kt=e.shadeTol?nt/(e.shadeTol/100):nt<.004?0:1/0;N[M]=rt<=1&&kt>=rt?1:0}for(let M=0;M<y;M++){(M&16383)===0&&await i();let v=f[M];v>=0&&(!E||E[M])&&g[M]<1&&o[M]>=0&&!(g[M]<=0&&x.weight[v]>0)&&N[v]&&b[M]&&A[M]&&(l[M]=1)}}if(a){for(let u=0;u<y;u++)(u&16383)===0&&await i(),R[u]=T&&U[u]>=0||l[u]?1:g[u];return{weight:R,score:x.score}}let h=new Uint8ClampedArray(d),m=0;for(let u=0;u<y;u++){(u&16383)===0&&await i();let N=T&&U[u]>=0,b=N||l[u]?1:g[u];if(b<=0)continue;R[u]=b;let A=u*4;if(e.mode==="transparent"){let M=!T||o[u]>0?null:N?F(f[u],U[u]):F(f[u]);if(M){let v=1-b*(1-M[3]);if(v>0)for(let P=0;P<3;P++)h[A+P]=(d[A+P]*(1-b)+M[P]*M[3]*b)/v;h[A+3]=Math.round(d[A+3]*v)}else h[A+3]=Math.round(d[A+3]*(1-b));h[A+3]||h.fill(0,A,A+4)}else{let M=F(f[u]);for(let v=0;v<3;v++)h[A+v]=d[A+v]+(M[v]-d[A+v])*b}(h[A]!==d[A]||h[A+1]!==d[A+1]||h[A+2]!==d[A+2]||h[A+3]!==d[A+3])&&m++}return{pixels:h,mask:g,weight:R,score:x.score,count:x.count,opaque:x.opaque,changed:m,capped:e.mode==="shift"&&j}}function It(t=12){let e=0;return()=>{if(!(performance.now()-e<t))return new Promise(n=>{let o=new MessageChannel;o.port1.onmessage=()=>{o.port1.close(),e=performance.now(),n()},o.port2.postMessage(0)})}}var W=null,et=null,$=0,At=It(),C=new Map;self.onmessage=async({data:t})=>{if(t.type==="release"){for(let n of C.keys())n.startsWith(t.documentId+":")&&C.delete(n);et?.startsWith(t.documentId+":")&&($++,W=null,et=null);return}let e=++$;try{if(!Number.isSafeInteger(t.imageId)||!Number.isSafeInteger(t.editId))throw Error("Invalid request identifiers.");if(t.type==="cancel")return;if(t.type==="image"){W=null,et=t.cacheKey;let o=C.get(t.cacheKey);if(o||(o=await wt(t.width,t.height,t.pixels,At,()=>e!==$)),e!==$)return;if(typeof t.cacheKey=="string"){let i=t.cacheKey.split(":")[0]+":";for(let r of C.keys())r.startsWith(i)&&C.delete(r);for(C.delete(t.cacheKey),C.set(t.cacheKey,o);C.size>3;)C.delete(C.keys().next().value)}W={...o,id:t.imageId},self.postMessage({type:"ready",imageId:t.imageId,editId:t.editId,palette:W.palette});return}if(t.type!=="edit"||!W||W.id!==t.imageId)throw Error("Unknown image or operation.");let n=await bt(W,t.rows,t.overrides,t.active,At,()=>e!==$);e===$&&self.postMessage({type:"result",imageId:t.imageId,editId:t.editId,...n},[n.pixels.buffer,n.mask.buffer,n.owner.buffer])}catch(n){e===$&&self.postMessage({type:"error",imageId:t.imageId,editId:t.editId,message:n.message})}};})();\n'], { type: "text/javascript" })
+        new Blob(['(()=>{var _=(t,e,n)=>Math.min(n,Math.max(e,t)),z=(t,e)=>Math.abs((t-e+540)%360-180),rt=(t,e)=>(t-e+540)%360-180;function B(t,e,n){t/=255,e/=255,n/=255;let o=Math.max(t,e,n),i=Math.min(t,e,n),r=o-i,a=(o+i)/2,s=0;return r&&(s=o===t?(e-n)/r%6:o===e?(n-t)/r+2:(t-e)/r+4),[(s*60+360)%360,r?r/(1-Math.abs(2*a-1)):0,a,r]}function Pt(t,e,n){t=(t%360+360)%360,e=_(e,0,1),n=_(n,0,1);let o=(1-Math.abs(2*n-1))*e,i=o*(1-Math.abs(t/60%2-1)),r=n-o/2,[a,s,u]=t<60?[o,i,0]:t<120?[i,o,0]:t<180?[0,o,i]:t<240?[0,i,o]:t<300?[i,0,o]:[o,0,i];return[a,s,u].map(h=>Math.round((h+r)*255))}function W(t){let e=String(t).trim().replace(/^#/,"");return/^[\\da-f]{3}$/i.test(e)&&(e=[...e].map(n=>n+n).join("")),/^[\\da-f]{6}$/i.test(e)?[0,2,4].map(n=>parseInt(e.slice(n,n+2),16)):null}var ut=(t,e,n)=>"#"+[t,e,n].map(o=>_(Math.round(o),0,255).toString(16).padStart(2,"0")).join("").toUpperCase(),et=Float32Array.from({length:256},(t,e)=>{let n=e/255;return n<=.04045?n/12.92:((n+.055)/1.055)**2.4}),Rt=t=>255*(t<=.0031308?12.92*t:1.055*Math.max(0,t)**(1/2.4)-.055);function J(t,e,n){let o=et[t],i=et[e],r=et[n],a=Math.cbrt(.4122214708*o+.5363325363*i+.0514459929*r),s=Math.cbrt(.2119034982*o+.6806995451*i+.1073969566*r),u=Math.cbrt(.0883024619*o+.2817188376*i+.6299787005*r),h=.2104542553*a+.793617785*s-.0040720468*u,l=1.9779984951*a-2.428592205*s+.4505937099*u,m=.0259040371*a+.7827717662*s-.808675766*u;return[h,Math.hypot(l,m),(Math.atan2(m,l)*180/Math.PI+360)%360]}function nt(t,e,n){let o=e*Math.cos(n*Math.PI/180),i=e*Math.sin(n*Math.PI/180),r=(t+.3963377774*o+.2158037573*i)**3,a=(t-.1055613458*o-.0638541728*i)**3,s=(t-.0894841775*o-1.291485548*i)**3;return[4.0767416621*r-3.3077115913*a+.2309699292*s,-1.2684380046*r+2.6097574011*a-.3413193965*s,-.0041960863*r-.7034186147*a+1.707614701*s]}var ct=t=>t.every(e=>e>=-1e-4&&e<=1+1e-4);function ot(t,e,n){t=_(t,0,1),e=Math.max(0,e);let o=nt(t,e,n);if(!ct(o)){let i=0,r=e;for(let a=0;a<16;a++){let s=(i+r)/2;ct(nt(t,s,n))?i=s:r=s}o=nt(t,i,n)}return o.map(i=>_(Math.round(Rt(i)),0,255))}var ht=.4;function K(t,e){if(e==="hsl"){let[r,a,s]=B(...t);return[r,a,s]}let[n,o,i]=J(...t);return[i,Math.min(1,o/ht),n]}var Y=(t,e,n,o)=>o==="hsl"?Pt(t,e,n):ot(n,e*ht,t);function Q(t,e,n){let[o,i,r]=K(t,n),[a,s,u]=K(e,n);return{dh:rt(a,o),ds:(s-i)*100,dl:(u-r)*100}}function at(t,e,n){return t<=e?e>0?t*n/e:n:e<1?n+(t-e)*(1-n)/(1-e):n}var dt=(t,e,n)=>n<e?t*n/e:at(t,e,n);var Ut=.06;function Dt(t,e){let n=t.length,o=[],i=new Array(n);for(let r=0;r<n-1;r++)o.push((e[r+1]-e[r])/(t[r+1]-t[r]));i[0]=o[0],i[n-1]=o[n-2];for(let r=1;r<n-1;r++)i[r]=o[r-1]*o[r]>0?(o[r-1]+o[r])/2:0;for(let r=0;r<n-1;r++){if(o[r]===0){i[r]=i[r+1]=0;continue}let a=i[r]/o[r],s=i[r+1]/o[r],u=a*a+s*s;if(u>9){let h=3/Math.sqrt(u);i[r]=h*a*o[r],i[r+1]=h*s*o[r]}}return r=>{if(r<=t[0])return e[0];if(r>=t[n-1])return e[n-1];let a=0;for(;r>t[a+1];)a++;let s=t[a+1]-t[a],u=(r-t[a])/s,h=u*u,l=h*u;return(2*l-3*h+1)*e[a]+(l-2*h+u)*s*i[a]+(3*h-2*l)*e[a+1]+(l-h)*s*i[a+1]}}function it(t,e){return n=>{if(n<=t[0])return e[0];let o=t.length;if(n>=t[o-1])return e[o-1];let i=0;for(;n>t[i+1];)i++;return e[i]+(e[i+1]-e[i])*(n-t[i])/(t[i+1]-t[i])}}function _t(t,e){let n=[...t].sort((a,s)=>a.l-s.l),o=n.reduce((a,s)=>a+s.weight,0);if(!o)return[];let i=[];for(let a=0,s=0,u=0;a<e;a++){let h=0,l=0,m=o*(a+1)/e;for(;u<n.length&&s+n[u].weight/2<=m;u++)h+=n[u].l*n[u].weight,l+=n[u].weight,s+=n[u].weight;l&&i.push(h/l)}let r=[];for(let a=0;a<32;a++){r=i.map(()=>[]);for(let h of n){let l=0;for(let m=1;m<i.length;m++)Math.abs(h.l-i[m])<Math.abs(h.l-i[l])&&(l=m);r[l].push(h)}r=r.filter(h=>h.length);let s=r.map(h=>h.reduce((l,m)=>l+m.l*m.weight,0)/h.reduce((l,m)=>l+m.weight,0)),u=s.length===i.length&&s.every((h,l)=>h===i[l]);if(i=s,u)break}return r.map(mt)}function mt(t){let e=t.reduce((a,s)=>a+s.weight,0),n=0,o=0,i=0,r=0;for(let a of t){let s=a.h*Math.PI/180,u=a.weight*Math.max(a.s,1e-6);n+=Math.cos(s)*u,o+=Math.sin(s)*u,i+=a.l*a.weight,r+=a.s*a.weight}return{h:(Math.atan2(o,n)*180/Math.PI+360)%360,s:r/e,l:i/e,weight:e,neutral:t.every(a=>a.neutral),members:t}}function gt(t,e,n){let o=t.ramp.map(M=>K(W(M),t.model)).sort((M,F)=>M[2]-F[2]),i=_t(e,o.length),r=[];for(let M of i)r.length&&M.l-r.at(-1).l<1/255?r.push(mt([...r.pop().members,...M.members])):r.push(M);if(r.length<2)return null;let a=r.length,s=r.map((M,F)=>o[Math.round(F*(o.length-1)/(a-1))]),u=r.map(M=>M.l),h=s.map(M=>M[2]),l=[],m=[];u[0]>0&&(l.push(0),m.push(0)),l.push(...u),m.push(...h),u.at(-1)<1&&(l.push(1),m.push(1));let y=Dt(l,m),x=r.every(M=>M.neutral),p=[];r.forEach((M,F)=>{let P=x?s[F][0]:rt(s[F][0],M.h);if(F){for(;P-p[F-1]>180;)P-=360;for(;P-p[F-1]<-180;)P+=360}p.push(P)});let I=it(u,p),R=x?it(u,s.map(M=>M[1])):it(u,s.map((M,F)=>Math.log(_(M[1]/Math.max(r[F].s,.01),1/64,64))));return M=>{let[F,P,N]=K(M,t.model);return Y(x?I(N):F+I(N),x?_(R(N),0,1):_(P*Math.exp(R(N)),0,1),_(y(N),0,1),t.model)}}function pt(t,e,n){let o=[];for(let i=0;i<e.length;i++)if(e[i]>0){let r=[t[i*3],t[i*3+1],t[i*3+2]],[a,s,u]=K(r,n);o.push({h:a,s,l:u,weight:e[i],neutral:B(...r)[3]<Ut})}return o}var yt=(t,e)=>Q(e,W(t.ramp[0]),t.model);var jt=4194304,$=.06,Ct=2,Ot=.2;function qt(t,e,n){if(!Number.isInteger(t)||!Number.isInteger(e)||t<1||e<1||t>8192||e>8192||t*e>jt||!(n instanceof Uint8ClampedArray)||n.length!==t*e*4)throw Error("Invalid image dimensions or pixel buffer.")}var Ht=16,bt=64,Lt=128,It=.12,wt=4*It,xt=99;function Kt(t,e,n){if(!Array.isArray(t)||t.length>bt||t.some(o=>typeof o?.hex=="string"?!/^#[\\dA-F]{6}$/i.test(o.hex):!Number.isInteger(o?.x)||!Number.isInteger(o.y)||o.x<0||o.y<0||o.x>=e||o.y>=n))throw Error("Invalid colour samples.")}function Wt(t){let e={hueTol:[0,180],shadeTol:[0,100],soft:[0,100],feather:[0,8],dh:[-180,180],ds:[-100,100],dl:[-100,100]};for(let[n,[o,i]]of Object.entries(e))if(!Number.isFinite(t[n])||t[n]<o||t[n]>i)throw Error("Invalid processing parameter: "+n);if(t.reflectionStrength!==void 0&&(!Number.isFinite(t.reflectionStrength)||t.reflectionStrength<0||t.reflectionStrength>100)||!["shift","flat","transparent","reflection"].includes(t.mode)||!["oklch","hsl"].includes(t.model)||!W(t.target)||typeof t.protect!="boolean"||typeof t.connected!="boolean"||typeof t.cleanEdges!="boolean")throw Error("Invalid colour operation.");if(t.ramp!=null&&(!Array.isArray(t.ramp)||t.ramp.length<1||t.ramp.length>8||t.ramp.some(n=>typeof n!="string"||!W(n))))throw Error("Invalid colour ramp.")}function At(t,e,n){if(!Array.isArray(t)||t.length<3||t.length>Lt||t.some(o=>!Number.isInteger(o?.x)||!Number.isInteger(o?.y)||o.x<0||o.y<0||o.x>=e||o.y>=n))throw Error("Invalid polygon.")}function Bt(t,e,n){let o=new Uint8Array(t*e),i=n.length;if(i<3)return o;let r=u=>u.x+.5,a=u=>u.y+.5,s=(u,h)=>{u>=0&&h>=0&&u<t&&h<e&&(o[h*t+u]=1)};for(let u=0;u<i;u++)s(n[u].x,n[u].y);for(let u=0;u<e;u++){let h=u+.5,l=[];for(let m=0;m<i;m++){let y=n[m],x=n[(m+1)%i],p=a(y),I=a(x),R=r(y),M=r(x);if(p===I){if(p===h){let F=Math.min(y.x,x.x),P=Math.max(y.x,x.x);for(let N=F;N<=P;N++)s(N,u)}continue}p>h!=I>h&&l.push(R+(h-p)*(M-R)/(I-p))}l.sort((m,y)=>m-y);for(let m=0;m+1<l.length;m+=2){let y=Math.ceil(l[m]-.5-1e-8),x=Math.floor(l[m+1]-.5+1e-8);for(let p=Math.max(0,y);p<=Math.min(t-1,x);p++)s(p,u)}}return o}function $t(t,e,n,o,i){if(!Array.isArray(t)||t.length<1||t.length>Ht)throw Error("Invalid colour map.");let r=new Set,a=0;for(let s of t){if(!Number.isInteger(s?.id)||s.id<1||s.id>127||r.has(s.id))throw Error("Invalid colour map.");r.add(s.id),Wt(s.params),Kt(s.seeds,o,i),s.polygon!=null&&At(s.polygon,o,i),a+=s.seeds.length}if(a>bt)throw Error("Invalid colour samples.");if(!Number.isInteger(n)||n<0||n>=t.length)throw Error("Invalid colour map.");if(!(e instanceof Int8Array)||e.length!==o*i)throw Error("Invalid selection buffer.");for(let s=0;s<e.length;s++)if(e[s]&&e[s]!==-1&&!r.has(e[s]))throw Error("Invalid brush override.")}async function kt(t,e,n,o=async()=>{},i=()=>!1){qt(t,e,n);let r=t*e,a=new Int32Array(r),s=[],u=new Map,h=r>1<<20,l=h?new Int32Array(1<<24):new Map,m=0;for(let p=0;p<r;p++){if((p&16383)===0&&(await o(),i()))throw Error("Cancelled");let I=p*4;if(!n[I+3]){a[p]=-1;continue}let R=n[I]<<16|n[I+1]<<8|n[I+2],M=(h?l[R]:l.get(R))||0;M||(M=++m,h?l[R]=M:l.set(R,M),s.push(n[I],n[I+1],n[I+2])),a[p]=M-1;let F=(n[I]>>4)*256+(n[I+1]>>4)*16+(n[I+2]>>4),P=u.get(F);P?P.weight+=n[I+3]:u.set(F,{weight:n[I+3],x:p%t,y:Math.floor(p/t),hex:ut(...n.subarray(I,I+3))})}let y=Uint8Array.from(s),x=new Float32Array(m*4);for(let p=0;p<m;p++){if((p&16383)===0&&(await o(),i()))throw Error("Cancelled");x.set(B(y[p*3],y[p*3+1],y[p*3+2]),p*4)}return{width:t,height:e,data:n,ids:a,colours:y,hsl:x,palette:[...u.values()].sort((p,I)=>I.weight-p.weight).slice(0,12)}}function Xt(t,e){let{width:n,ids:o,hsl:i,colours:r}=t,a=[];for(let s of e){if(typeof s.hex=="string"){let l=W(s.hex);a.push({i:-1,rgb:l,v:Float32Array.from(B(...l))});continue}let u=s.y*n+s.x,h=o[u];h>=0&&a.push({i:u,rgb:[r[h*3],r[h*3+1],r[h*3+2]],v:i.subarray(h*4,h*4+4)})}return a}function Et(t,e,n){if(t[e+3]<$)return Math.abs(t[e+2]-n[2])/2;let o=Math.max(Math.abs(t[e+1]-n[1]),Math.abs(t[e+2]-n[2]));return z(t[e],n[0])/45+o/2}async function Gt(t,e,n,o,i,r=null){let{width:a,height:s,data:u,ids:h,hsl:l,colours:m}=t,y=a*s,x=l.length/4;r!=null&&At(r,a,s);let p=Xt(t,n),I=e.mode==="reflection",R=I?Math.max(20,e.soft):e.soft,M=new Float32Array(x),F=new Float32Array(x).fill(xt),P=new Uint8Array(x);if(p.length)for(let w=0;w<x;w++){(w&16383)===0&&await i();let c=w*4,g=l[c+3]<$;if(I&&!l[c+3])continue;let f=1/0,b=1/0,T=xt,E=-1,q=0;for(let d=0;d<p.length;d++){let v=p[d].v,S=g||I?Math.abs(l[c+2]-v[2]):Math.max(Math.abs(l[c+1]-v[1]),Math.abs(l[c+2]-v[2])),A=z(l[c],v[0])/180+S;if(A<b&&(b=A,q=d),I?!v[3]:g!==v[3]<$)continue;let k=z(l[c],v[0]);T=Math.min(T,I?k/45+S/2:Et(l,c,v));let U=Math.max(g&&!I?0:e.hueTol?k/e.hueTol:k<.5?0:1/0,e.shadeTol?S/(e.shadeTol/100):S<.004?0:1/0);U<f&&(f=U,E=d)}P[w]=E>=0?E:q,F[w]=T,f<=1&&(M[w]=R?Math.min(1,(1-f)/(R/100)):1)}let N=new Float32Array(y);for(let w=0;w<y;w++)(w&16383)===0&&await i(),h[w]>=0&&(N[w]=M[h[w]]);let j=r?Bt(a,s,r):null;if(j)for(let w=0;w<y;w++)(w&16383)===0&&await i(),j[w]||(N[w]=0);if(e.connected&&p.length){let w=new Uint8Array(y),c=new Int32Array(y),g=0,f=0;for(let{i:b}of p)b>=0&&N[b]>0&&!w[b]&&(w[b]=1,c[f++]=b);for(;g<f;){(g&16383)===0&&await i();let b=c[g++],T=b%a,E=Math.floor(b/a);for(let q=-1;q<=1;q++)for(let d=-1;d<=1;d++){let v=T+d,S=E+q,A=S*a+v;v>=0&&v<a&&S>=0&&S<s&&!w[A]&&N[A]>0&&(w[A]=1,c[f++]=A)}}for(let b=0;b<y;b++)(b&16383)===0&&await i(),w[b]||(N[b]=0)}for(let w=0;w<y;w++){if((w&16383)===0&&await i(),o[w]!==0&&o[w]!==1&&o[w]!==-1)throw Error("Invalid brush override.");o[w]&&(N[w]=u[w*4+3]&&o[w]>0?1:0)}let D=Math.round(e.feather);if(D){let w=new Float32Array(y);for(let c=0;c<s;c++){(c&15)===0&&await i();let g=0;for(let f=-D;f<=D;f++)g+=N[c*a+_(f,0,a-1)];for(let f=0;f<a;f++)w[c*a+f]=g/(D*2+1),g+=N[c*a+_(f+D+1,0,a-1)]-N[c*a+_(f-D,0,a-1)]}for(let c=0;c<a;c++){(c&15)===0&&await i();let g=0;for(let f=-D;f<=D;f++)g+=w[_(f,0,s-1)*a+c];for(let f=0;f<s;f++)N[f*a+c]=u[(f*a+c)*4+3]?g/(D*2+1):0,g+=w[_(f+D+1,0,s-1)*a+c]-w[_(f-D,0,s-1)*a+c]}}let O=0,C=0;for(let w=0;w<y;w++)(w&16383)===0&&await i(),u[w*4+3]&&C++,j&&!j[w]&&o[w]<=0&&(N[w]=0),I&&o[w]<0&&(N[w]=0),N[w]>0&&O++;return{mask:N,weight:M,score:F,nearest:P,source:p,count:O,opaque:C,inside:j}}async function Mt(t,e,n,o){let i=t*e,r=new Uint8Array(i);for(let a=0;a<i;a++)(a&16383)===0&&await o(),n(a)&&(r[a]=1);for(let a=2;a<=Ct+1;a++)for(let s=0;s<i;s++){if((s&16383)===0&&await o(),r[s])continue;let u=s%t,h=(s-u)/t;for(let l=-1;l<=1&&!r[s];l++)for(let m=-1;m<=1;m++){let y=u+m,x=h+l,p=x*t+y;if(y>=0&&y<t&&x>=0&&x<e&&r[p]&&r[p]<a){r[s]=a;break}}}return r}function St(t,e){let{data:n}=t;if(e.source.length)return e.source.at(-1).rgb;let o=[0,0,0],i=0;for(let r=0;r<e.mask.length;r++)if(e.mask[r]>0){for(let a=0;a<3;a++)o[a]+=n[r*4+a]*e.mask[r];i+=e.mask[r]}return i?o.map(r=>Math.round(r/i)):null}async function Vt(t,e,n){let o=-1,i=-1,r=1/0;for(let a=0;a<e.weight.length;a++){(a&16383)===0&&await n();let s=e.nearest[a];if(!e.weight[a]||s<i)continue;let u=Et(t.hsl,a*4,e.source[s].v);(s>i||u<r)&&(o=a,i=s,r=u)}return o<0?St(t,e):t.colours.subarray(o*3,o*3+3)}function zt(t,e){let[n,o,i]=K(e,t.model),r=B(...e)[3]<$,a=o+t.ds/100,s=i+t.dl/100,u=_(a,0,1),h=_(s,0,1),l=n+t.dh;return{shift:y=>{let[,x,p]=K(y,t.model);return Y(l,r?u:t.protect?dt(x,o,u):_(x+t.ds/100,0,1),t.protect?at(p,i,h):_(p+t.dl/100,0,1),t.model)},capped:a!==u||s!==h}}function Jt(t){let[,,e]=J(...t),n=e*Math.PI/180,o=Math.cos(n),i=Math.sin(n),r=Math.max(...t)===Math.min(...t);return(a,s)=>{if(a[0]===a[1]&&a[1]===a[2])return a;let[u,h,l]=J(...a),m=l*Math.PI/180,y=r?0:s,x=h*(Math.cos(m)*(1-s)+o*y),p=h*(Math.sin(m)*(1-s)+i*y);return ot(u,Math.hypot(x,p),Math.atan2(p,x)*180/Math.PI)}}function Yt(t,e){let n=0;for(let o=0;o<3;o++){let i=t[o]/255,r=e[o]/255;i>r?n=Math.max(n,(i-r)/(1-r)):i<r&&(n=Math.max(n,(r-i)/r))}return n=Math.round(n*255)/255,n?[...[0,1,2].map(o=>_(Math.round((t[o]-(1-n)*e[o])/n),0,255)),n]:[0,0,0,0]}var Qt=(t,e)=>async()=>{if(await t(),e())throw Error("Cancelled")};async function Nt(t,e,n,o,i=async()=>{},r=()=>!1){let{width:a,height:s,data:u,ids:h}=t,l=a*s;$t(e,n,o,a,s);let m=Qt(i,r),y=new Uint8ClampedArray(u),x=new Float32Array(4*l),p=new Float32Array(l),I=new Float32Array(l),R=new Float32Array(l),M=new Uint8Array(l),F=new Int8Array(l).fill(-1),P=new Int8Array(l),N=[],j=e.map((c,g)=>({index:g,key:JSON.stringify([c.seeds,c.params,c.polygon])}));j.sort((c,g)=>c.key<g.key?-1:c.key>g.key?1:0);let D=async(c,g=!1)=>{let f=e[c];for(let b=0;b<l;b++)(b&16383)===0&&await m(),P[b]=n[b]===f.id?1:n[b]?-1:0;return te(t,f.params,f.seeds,P,m,f.polygon,g)},O=e.length>2;if(O){I.fill(1/0);for(let{index:c}of j){let g=await D(c,!0);for(let f=0;f<l;f++)(f&16383)===0&&await m(),g.weight[f]>0&&(I[f]=Math.min(I[f],P[f]===1||h[f]<0?0:g.score[h[f]]))}}let C=null;for(let{index:c}of j){let g=await D(c);N[c]=g.count,c===o&&(C=g);for(let f=0;f<l;f++){(f&16383)===0&&await m();let b=g.weight[f];if(!(b>0))continue;let T=P[f]===1||h[f]<0?0:g.score[h[f]],E=f*4;if((O||M[f])&&T>I[f]+wt)continue;!O&&(!M[f]||T<I[f]-wt)&&(I[f]=T,M[f]=0,p[f]=R[f]=0);let q=b*Math.exp(-(T-I[f])/It);if(!M[f]){y.set(g.pixels.subarray(E,E+4),E);for(let d=0;d<4;d++)x[E+d]=0}M[f]++;for(let d=0;d<4;d++)x[E+d]+=q*g.pixels[E+d];p[f]+=q,q>R[f]&&(R[f]=q,F[f]=c)}}for(let c=0;c<l;c++)if((c&16383)===0&&await m(),M[c]>1&&p[c]>0)for(let g=0;g<4;g++)y[c*4+g]=x[c*4+g]/p[c];e.length>1&&await Zt(t,e,F,y,m);let w=0;for(let c=0;c<l;c++){(c&16383)===0&&await m();let g=c*4;(y[g]!==u[g]||y[g+1]!==u[g+1]||y[g+2]!==u[g+2]||y[g+3]!==u[g+3])&&w++}return{pixels:y,mask:C.mask,owner:F,counts:N,count:C.count,opaque:C.opaque,changed:w,capped:C.capped}}var Z=2,tt=3;async function Zt(t,e,n,o,i){let{width:r,height:a,data:s}=t,u=e.map(m=>m.params.mode!=="transparent"&&m.params.mode!=="reflection"),h=[];if(u.filter(Boolean).length<2)return;let l=(m,y)=>s[m*4+y];for(let m=0;m<a;m++){(m&15)===0&&await i();for(let y=0;y<r;y++){let x=m*r+y,p=n[x];if(p<0||!u[p])continue;let I=-1;for(let c=-Z;c<=Z&&I<0;c++)for(let g=-Z;g<=Z;g++){let f=y+g,b=m+c;if(f<0||b<0||f>=r||b>=a)continue;let T=n[b*r+f];if(T>=0&&T!==p&&u[T]){I=T;break}}if(I<0)continue;let R=[[],[]];for(let c=-tt;c<=tt;c++)for(let g=-tt;g<=tt;g++){let f=y+g,b=m+c;if(f<0||b<0||f>=r||b>=a)continue;let T=b*r+f;s[T*4+3]&&(n[T]===p?R[0].push(T):n[T]===I&&R[1].push(T))}let M=-1,F=-1;for(let c of R[1]){let g=0;for(let f=0;f<3;f++)g+=(l(c,f)-l(x,f))**2;g>F&&(F=g,M=c)}let P=-1,N=0,j=0;for(let c of R[0]){let g=[0,1,2].map(E=>l(c,E)-l(M,E)),f=g[0]**2+g[1]**2+g[2]**2;if(f<3*32**2)continue;let b=0;for(let E=0;E<3;E++)b+=(l(x,E)-l(M,E))*g[E];if(b/=f,b>.97||b<.03)continue;let T=0;for(let E=0;E<3;E++)T+=(l(x,E)-(l(M,E)+b*g[E]))**2;T<=.04*f&&f>j&&(P=c,N=b,j=f)}if(P<0)continue;let D=[0,1,2].map(c=>l(P,c)),O=c=>{let g=0;for(let f=0;f<3;f++)g+=(l(c,f)-D[f])**2;return g},C=!1;for(let c=-1;c<=1&&!C;c++)for(let g=-1;g<=1;g++){let f=y+g,b=m+c,T=b*r+f;if(f>=0&&b>=0&&f<r&&b<a&&n[T]===p&&s[T*4+3]&&O(T)<O(x)-.01*j){C=!0;break}}if(!C)continue;let w=!0;for(let c=0;c<3;c++)w&&=o[P*4+c]===l(P,c)&&o[M*4+c]===l(M,c);w||h.push(x,...[0,1,2].map(c=>o[P*4+c]*N+o[M*4+c]*(1-N)))}}for(let m=0;m<h.length;m+=4)for(let y=0;y<3;y++)o[h[m]*4+y]=h[m+1+y]}async function te(t,e,n,o,i,r=null,a=!1){let{width:s,height:u,data:h,ids:l,colours:m}=t,y=s*u,x=await Gt(t,e,n,o,i,r),{mask:p,inside:I}=x,R=new Float32Array(y),M=W(e.target),F=e.mode==="reflection",P=F?(e.reflectionStrength??100)/100:1,N=F&&!a?Jt(M):null,j=e.mode==="shift"&&x.count?e.matchTarget?await Vt(t,x,i):St(t,x):null,D=e.mode==="transparent"&&e.cleanEdges&&x.source.length,O=new Map,C,w=!1,c=j&&e.matchTarget?{...e,...Q(j,M,e.model)}:e;if(!a&&j&&!e.ramp?.length&&!c.dh&&!c.ds&&!c.dl)C=d=>d;else if(j&&!a){let d=null;if(e.ramp?.length>1){let v=new Float64Array(m.length/3);for(let S=0;S<y;S++)(S&16383)===0&&await i(),p[S]>0&&l[S]>=0&&(v[l[S]]+=p[S]);d=gt(e,pt(m,v,e.model))}d?C=d:{shift:C,capped:w}=zt(e.ramp?.length?{...e,...yt(e,j)}:c,j)}let g=(d,v=x.nearest[d])=>{let S=d*64+v,A=O.get(S);if(!A){let k=[m[d*3],m[d*3+1],m[d*3+2]];e.mode==="flat"?A=M:D?A=Yt(k,x.source[v].rgb):A=C(k),O.set(S,A)}return A},f=(d,v)=>{let S=O.get(d);return S?.weight!==v&&(S={weight:v,rgb:N(m.subarray(d*3,d*3+3),v)},O.set(d,S)),S.rgb},b=new Int8Array(D?y:0).fill(-1);if(D)for(let d=0;d<y;d++){if((d&16383)===0&&await i(),p[d]>0||I&&!I[d]||l[d]<0||o[d]<0||x.weight[l[d]]>0)continue;let v=d%s,S=(d-v)/s;for(let A=-1;A<=1&&b[d]<0;A++)for(let k=-1;k<=1;k++){let U=v+k,H=S+A,V=H*s+U;if(U>=0&&U<s&&H>=0&&H<u&&p[V]>0&&l[V]>=0){b[d]=x.nearest[l[V]];break}}}let T=new Uint8Array(j&&e.mode==="shift"&&x.source.length&&!e.feather?y:0);if(T.length){let{hsl:d}=t,v=new Uint8Array(d.length/4),S=await Mt(s,u,k=>p[k]>0,i),A=await Mt(s,u,k=>l[k]>=0&&(d[l[k]*4+3]<$||d[l[k]*4+2]<Ot),i);for(let k=0;k<v.length;k++){(k&16383)===0&&await i();let U=k*4,H=x.source[x.nearest[k]].v;if(d[U+3]<$||H[3]<$)continue;let V=z(d[U],H[0]),lt=Math.max(Math.abs(d[U+1]-H[1]),Math.abs(d[U+2]-H[2])),ft=e.hueTol?V/e.hueTol:V<.5?0:1/0,vt=e.shadeTol?lt/(e.shadeTol/100):lt<.004?0:1/0;v[k]=ft<=1&&vt>=ft?1:0}for(let k=0;k<y;k++){(k&16383)===0&&await i();let U=l[k];U>=0&&(!I||I[k])&&p[k]<1&&o[k]>=0&&!(p[k]<=0&&x.weight[U]>0)&&v[U]&&S[k]&&A[k]&&(T[k]=1)}}if(a){for(let d=0;d<y;d++)(d&16383)===0&&await i(),R[d]=D&&b[d]>=0||T[d]?1:p[d]*P;return{weight:R,score:x.score}}let E=new Uint8ClampedArray(h),q=0;for(let d=0;d<y;d++){(d&16383)===0&&await i();let v=D&&b[d]>=0,S=v||T[d]?1:p[d]*P;if(S<=0)continue;R[d]=S;let A=d*4;if(e.mode==="transparent"){let k=!D||o[d]>0?null:v?g(l[d],b[d]):g(l[d]);if(k){let U=1-S*(1-k[3]);if(U>0)for(let H=0;H<3;H++)E[A+H]=(h[A+H]*(1-S)+k[H]*k[3]*S)/U;E[A+3]=Math.round(h[A+3]*U)}else E[A+3]=Math.round(h[A+3]*(1-S));E[A+3]||E.fill(0,A,A+4)}else if(F)E.set(f(l[d],S),A);else{let k=g(l[d]);for(let U=0;U<3;U++)E[A+U]=h[A+U]+(k[U]-h[A+U])*S}(E[A]!==h[A]||E[A+1]!==h[A+1]||E[A+2]!==h[A+2]||E[A+3]!==h[A+3])&&q++}return{pixels:E,mask:p,weight:R,score:x.score,count:x.count,opaque:x.opaque,changed:q,capped:e.mode==="shift"&&w}}function Tt(t=12){let e=0;return()=>{if(!(performance.now()-e<t))return new Promise(n=>{let o=new MessageChannel;o.port1.onmessage=()=>{o.port1.close(),e=performance.now(),n()},o.port2.postMessage(0)})}}var X=null,st=null,G=0,Ft=Tt(),L=new Map;self.onmessage=async({data:t})=>{if(t.type==="release"){for(let n of L.keys())n.startsWith(t.documentId+":")&&L.delete(n);st?.startsWith(t.documentId+":")&&(G++,X=null,st=null);return}let e=++G;try{if(!Number.isSafeInteger(t.imageId)||!Number.isSafeInteger(t.editId))throw Error("Invalid request identifiers.");if(t.type==="cancel")return;if(t.type==="image"){X=null,st=t.cacheKey;let o=L.get(t.cacheKey);if(o||(o=await kt(t.width,t.height,t.pixels,Ft,()=>e!==G)),e!==G)return;if(typeof t.cacheKey=="string"){let i=t.cacheKey.split(":")[0]+":";for(let r of L.keys())r.startsWith(i)&&L.delete(r);for(L.delete(t.cacheKey),L.set(t.cacheKey,o);L.size>3;)L.delete(L.keys().next().value)}X={...o,id:t.imageId},self.postMessage({type:"ready",imageId:t.imageId,editId:t.editId,palette:X.palette});return}if(t.type!=="edit"||!X||X.id!==t.imageId)throw Error("Unknown image or operation.");let n=await Nt(X,t.rows,t.overrides,t.active,Ft,()=>e!==G);e===G&&self.postMessage({type:"result",imageId:t.imageId,editId:t.editId,...n},[n.pixels.buffer,n.mask.buffer,n.owner.buffer])}catch(n){e===G&&self.postMessage({type:"error",imageId:t.imageId,editId:t.editId,message:n.message})}};})();\n'], { type: "text/javascript" })
       );
       worker = new Worker(url);
       worker.onmessage = ({ data: m }) => receive(m);
@@ -11860,7 +11931,9 @@ dialog details {
     $("coverage").textContent = m.count ? m.count.toLocaleString() + " pixels selected \xB7 " + Math.round(m.count / Math.max(1, m.opaque) * 100) + "% of the asset" : seeds.length ? "No matching pixels. Increase tolerance, or add a sample." : "Click a colour or choose an image swatch.";
     $("coverage").title = $("coverage").textContent;
     $("resultNote").textContent = m.changed ? m.changed.toLocaleString() + " px changed" : "";
-    if (seeds.length) {
+    if (params.mode === "reflection") {
+      $("targetText").textContent = seeds.length || m.count ? "Target sets the tint. Lightness is preserved." : "Sample the reflection or brush over it.";
+    } else if (seeds.length) {
       const sd = seeds.at(-1), o = (sd.y * w + sd.x) * 4;
       $("targetText").textContent = params.manual && params.mode === "shift" ? "Adjusted by hand. Return to target to follow the colour again." : params.mode === "transparent" ? "Selected pixels become transparent." : (params.ramp && params.mode === "shift" ? "Tone " + params.ramp.join(" \xB7 ") : "Requested " + params.target) + " \xB7 achieved " + toHex(...m.pixels.subarray(o, o + 3));
     } else $("targetText").textContent = "Pick a source colour to begin.";
@@ -15496,7 +15569,11 @@ Copyright (c) 2000-2024 The Legion of the Bouncy Castle Inc. (https://www.bouncy
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Original C# port and code by Christian Winnerlein (CodesInChaos), public domain, https://github.com/CodesInChaos/Chaos.NaCl . Poly1305 by Andrew M. (floodyberry), MIT or public domain. Curve25519, Ed25519, Salsa20 and HSalsa20 from SUPERCOP ref10 by Dan Bernstein, public domain (http://bench.cr.yp.to/supercop.html). SHA512 by Christian Winnerlein, public domain.</pre></template>
-    <template id="release-notes"><pre>## Barhex 0.1.6
+    <template id="release-notes"><pre>## Barhex 0.1.7
+
+Recolour reflected light with the new **Reflection** treatment. It preserves the surface’s shading and follows the tint as it fades into grey. Use **Strength** to blend the new tint with the original, and use the brush or polygon in Advanced to limit where it applies.
+
+## Barhex 0.1.6
 
 Save sessions with more tabs and longer edit histories. Barhex still opens older JSON sessions. New session files require 0.1.6 or later. Barhex checks recipe limits before downloading a recipe.
 
